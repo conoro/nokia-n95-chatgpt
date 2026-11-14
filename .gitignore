@@ -1,0 +1,13 @@
+.toolchain/
+build/
+dist/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+blog-draft.md
+.agents/
+.codex/
+.aws/
+.DS_Store
