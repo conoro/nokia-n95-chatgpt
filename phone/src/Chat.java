@@ -6,6 +6,9 @@ import javax.microedition.rms.RecordStore;
 
 public class Chat extends MIDlet implements CommandListener, Runnable {
     private Display display;
+    private ChoiceGroup engine = new ChoiceGroup("Voice engine", Choice.EXCLUSIVE,
+        new String[] {"Sol + transcription + TTS", "Realtime speech-to-speech"}, null);
+    private String realtimePrevious = "";
     private ChoiceGroup playback = new ChoiceGroup("Speech playback", Choice.EXCLUSIVE,
         new String[] {"Buffered (original)", "Streaming (experimental)"}, null);
     private Command timings = new Command("Timings", Command.SCREEN, 5);
@@ -52,7 +55,16 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
                 display.setCurrent(chat);
                 if (error != null) { history.setText(transcript + "\nMicrophone: " + error); return; }
                 if (audio == null || audio.length == 0) return;
-                pendingAudio = audio; voiceTurn = true; busy = true;
+                voiceTurn = true; busy = true;
+                if (engine.getSelectedIndex() == 1) {
+                    pending = "[Voice message]";
+                    history.setText(transcript + "\nSending audio to Realtime...");
+                    speech = new Speech(Chat.this, url.getString(), token.getString(), audio,
+                        playback.getSelectedIndex() == 1, realtimePrevious);
+                    new Thread(speech).start();
+                    return;
+                }
+                pendingAudio = audio;
                 history.setText(transcript + "\nTranscribing...");
                 new Thread(Chat.this).start();
             }
@@ -73,7 +85,8 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
         display.callSerially(new Runnable() {
             public void run() {
                 if (speech != source) return;
-                previous = id;
+                if (id.startsWith("rt_")) realtimePrevious = id;
+                else previous = id;
                 transcript += "\nYou: " + pending + "\nChatGPT: " + answer + "\n";
                 if (transcript.length() > 12000) transcript = transcript.substring(transcript.length() - 12000);
                 history.setText(transcript + (error == null ? "" : "\nSpeech: " + error));
@@ -86,7 +99,7 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
         chat.append(history); chat.append(message);
         chat.addCommand(timings); chat.addCommand(stopSpeech); chat.addCommand(talk); chat.addCommand(send); chat.addCommand(config); chat.addCommand(fresh); chat.addCommand(exit);
         chat.setCommandListener(this);
-        settings.append(url); settings.append(token); settings.append(playback);
+        settings.append(url); settings.append(token); settings.append(playback); settings.append(engine);
         settings.addCommand(save); settings.setCommandListener(this);
         try {
             RecordStore store = RecordStore.openRecordStore("settings", true);
@@ -95,6 +108,7 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
                     DataInputStream in = new DataInputStream(new ByteArrayInputStream(store.getRecord(1)));
                     url.setString(in.readUTF()); token.setString(in.readUTF());
                     if (in.available() > 0) playback.setSelectedIndex(in.readBoolean() ? 1 : 0, true);
+                    if (in.available() > 0) engine.setSelectedIndex(in.readBoolean() ? 1 : 0, true);
                     in.close();
                 }
             } finally { store.closeRecordStore(); }
@@ -124,19 +138,19 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
             voice = new Voice(this); display.setCurrent(voice);
         }
         if (command == config) display.setCurrent(settings);
-        if (command == fresh) { previous = ""; transcript = ""; history.setText("Ready"); }
+        if (command == fresh) { previous = ""; realtimePrevious = ""; transcript = ""; history.setText("Ready"); }
         if (command == save) {
             try {
                 ByteArrayOutputStream bytes = new ByteArrayOutputStream();
                 DataOutputStream out = new DataOutputStream(bytes);
-                out.writeUTF(url.getString()); out.writeUTF(token.getString()); out.writeBoolean(playback.getSelectedIndex() == 1); out.close();
+                out.writeUTF(url.getString()); out.writeUTF(token.getString()); out.writeBoolean(playback.getSelectedIndex() == 1); out.writeBoolean(engine.getSelectedIndex() == 1); out.close();
                 byte[] data = bytes.toByteArray();
                 RecordStore store = RecordStore.openRecordStore("settings", true);
                 try {
                     if (store.getNumRecords() == 0) store.addRecord(data, 0, data.length);
                     else store.setRecord(1, data, 0, data.length);
                 } finally { store.closeRecordStore(); }
-                previous = ""; transcript = ""; history.setText("Ready");
+                previous = ""; realtimePrevious = ""; transcript = ""; history.setText("Ready");
                 display.setCurrent(chat);
             } catch (Exception error) { history.setText("Cannot save settings: " + error.toString()); display.setCurrent(chat); }
         }

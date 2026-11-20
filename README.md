@@ -281,3 +281,58 @@ This removes the phone text-download/TTS-upload round trip. Synthesis still
 starts after the model has generated the answer text. Transcription remains a
 separate step. Timings now resets on opening each Voice screen and includes a
 turn number. Restart the relay and install the new JAR/JAD for this protocol.
+
+## Realtime speech-to-speech experiment (0.5.0)
+
+Branch `experiment/realtime-voice` adds a separate voice engine. The working
+0.4.1 pipeline has been promoted to `main` and remains selectable in Settings.
+
+Install the relay dependency in a virtual environment, then restart the relay
+using that environment's Python:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r proxy/requirements.txt
+.venv/bin/python proxy/server.py
+```
+
+Set `OPENAI_REALTIME_MODEL=gpt-realtime-2.1` and
+`OPENAI_REALTIME_VOICE=marin` in `.env` (already added on the development machine).
+Install the 0.5.0 JAR/JAD. In Settings select **Realtime speech-to-speech** under
+Voice engine and **Streaming (experimental)** under Speech playback, then Save.
+The first engine option restores the Sol/transcription/TTS pipeline. Buffered
+playback also works with Realtime, but waits for the complete MP3.
+
+The phone uploads the recording on PTT release. The relay converts it to 24 kHz
+mono PCM, sends it to the Realtime model over a secure WebSocket, commits the
+turn explicitly, and requests a spoken response. Incoming model PCM audio is
+incrementally encoded to 48 kbps MP3 with FFmpeg and forwarded to the N95.
+There is no separate input-transcription, Sol, or TTS API request in this mode.
+Live upload while holding PTT is not implemented.
+
+Realtime voice maintains its own conversation, separate from typed/Sol chat.
+User turns display as `[Voice message]`. The model's spoken-answer transcript
+is fetched after playback finishes. No separate transcription is requested.
+New conversation or saving Settings clears the local Realtime session ID.
+
+The relay reuses a WebSocket across voice turns. Sessions idle for over five
+minutes are closed when another request checks the pool, which is capped at
+eight sessions. A restart, idle expiry, upstream disconnect or interrupted
+stream can invalidate the session. Choose New conversation if that happens.
+Stop speech closes the phone player and stream; an upstream request may already
+have incurred usage. If playback is interrupted the model may have generated
+more of its answer than you heard. Realtime uses its own model billing.
+
+The bridge retains completed answer text temporarily for display retrieval.
+The Realtime conversation lives in the upstream session and is not connected
+to the Responses API's previous_response_id. Session IDs and answers are kept
+in relay memory. Handset recording content is sent directly to OpenAI in this
+mode. The same trusted-LAN HTTP limitations apply.
+
+Validation includes real FFmpeg conversion/encoding with simulated Realtime
+events, error cleanup, and the existing endpoint tests. Handset playback and
+latency still need testing with this new mode. Run tests with:
+
+```bash
+.venv/bin/python -m unittest discover -s proxy -v
+```

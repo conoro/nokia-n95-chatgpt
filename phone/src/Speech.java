@@ -10,6 +10,7 @@ public class Speech implements Runnable, PlayerListener {
     private String text;
     private boolean streaming;
     private String previous;
+    private byte[] recording;
     private String responseId;
     private volatile boolean cancelled;
     private volatile boolean ended;
@@ -25,6 +26,10 @@ public class Speech implements Runnable, PlayerListener {
     public Speech(Chat app, String url, String token, String text, boolean streaming, String previous) {
         this(app, url, token, text, streaming);
         this.previous = previous;
+    }
+    public Speech(Chat app, String url, String token, byte[] recording, boolean streaming, String previous) {
+        this(app, url, token, "", streaming, previous);
+        this.recording = recording;
     }
     private void fetchReply(String error) throws IOException {
         HttpConnection http = null;
@@ -79,16 +84,16 @@ public class Speech implements Runnable, PlayerListener {
         boolean announced = false;
         String error = null;
         try {
-            HttpConnection http = (HttpConnection) Connector.open(url + (previous != null ? (streaming ? "/voice-chat-stream" : "/voice-chat") : (streaming ? "/speak-stream" : "/speak")), Connector.READ_WRITE, true);
+            HttpConnection http = (HttpConnection) Connector.open(url + (recording != null ? "/realtime" : previous != null ? (streaming ? "/voice-chat-stream" : "/voice-chat") : (streaming ? "/speak-stream" : "/speak")), Connector.READ_WRITE, true);
             synchronized (this) {
                 if (cancelled) { http.close(); return; }
                 connection = http;
             }
             http.setRequestMethod(HttpConnection.POST);
-            http.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
+            http.setRequestProperty("Content-Type", recording != null ? "application/octet-stream" : "text/plain; charset=utf-8");
             http.setRequestProperty("X-Bridge-Token", token);
             if (previous != null && previous.length() > 0) http.setRequestProperty("X-Response-Id", previous);
-            byte[] request = text.getBytes("UTF-8");
+            byte[] request = recording != null ? recording : text.getBytes("UTF-8");
             http.setRequestProperty("Content-Length", Integer.toString(request.length));
             output = http.openOutputStream(); output.write(request); output.close(); output = null;
             int status = http.getResponseCode();
@@ -122,14 +127,17 @@ public class Speech implements Runnable, PlayerListener {
             current.start();
             app.timing((streaming ? "Streaming" : "Buffered") + " player start: " + (System.currentTimeMillis() - started) + " ms");
             app.playbackStarted();
-            if (previous != null) fetchReply(null);
-            else app.speechReady(this, null);
-            announced = true;
+            if (recording == null) {
+                if (previous != null) fetchReply(null);
+                else app.speechReady(this, null);
+                announced = true;
+            }
             long deadline = System.currentTimeMillis() + 180000;
             while (!ended && !cancelled && System.currentTimeMillis() < deadline) Thread.sleep(50);
             if (!cancelled) {
                 error = playbackError;
                 if (!ended) error = "Playback timed out";
+                if (recording != null && ended) { fetchReply(error); announced = true; }
             }
         } catch (Exception exception) {
             if (!cancelled) error = exception.toString();

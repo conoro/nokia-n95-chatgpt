@@ -11,3 +11,5 @@ blog-draft.md
 .codex/
 .aws/
 .DS_Store
+
+.venv/

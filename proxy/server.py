@@ -133,6 +133,41 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 self.log_message('speech stream %.3fs, %d bytes', time.monotonic() - started, total)
 
+    def realtime(self, raw):
+        from realtime_voice import stream_turn
+        key = ['']
+        sent = False
+        def ready(session_id):
+            key[0] = session_id
+            with reply_lock:
+                reply_cache.pop(session_id, None)
+        def done(session_id, text):
+            with reply_lock:
+                if len(reply_cache) >= 128:
+                    del reply_cache[next(iter(reply_cache))]
+                reply_cache[session_id] = (time.monotonic(), text)
+        chunks = stream_turn(raw, self.headers.get('X-Response-Id', ''), ready, done)
+        try:
+            for chunk in chunks:
+                if not sent:
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'audio/mpeg')
+                    self.send_header('X-Response-Id', key[0])
+                    self.send_header('Connection', 'close')
+                    self.end_headers()
+                    self.close_connection = True
+                    sent = True
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except Exception as error:
+            self.log_message('Realtime failed (%s)', type(error).__name__)
+            if not sent:
+                self.reply(502, 'Realtime failed. Check model access, dependency installation, or start a New conversation.')
+            else:
+                done(key[0], '[Realtime reply interrupted. Choose New conversation.]')
+        finally:
+            chunks.close()
+
     def do_POST(self):
         started = time.monotonic()
         try:
@@ -141,19 +176,21 @@ class Handler(BaseHTTPRequestHandler):
             self.log_message('%s total %.3fs', self.path, time.monotonic() - started)
 
     def handle_post(self):
-        if self.path not in ('/chat', '/transcribe', '/speak', '/speak-stream', '/voice-chat', '/voice-chat-stream', '/reply'):
+        if self.path not in ('/chat', '/transcribe', '/speak', '/speak-stream', '/voice-chat', '/voice-chat-stream', '/reply', '/realtime'):
             return self.reply(404, 'Not found')
         if not hmac.compare_digest(self.headers.get('X-Bridge-Token', ''), os.environ['BRIDGE_TOKEN']):
             return self.reply(401, 'Incorrect bridge token')
         try:
             length = int(self.headers.get('Content-Length', '0'))
-            limit = 2097152 if self.path == '/transcribe' else 8192
+            limit = 2097152 if self.path in ('/transcribe', '/realtime') else 8192
             if not 0 < length <= limit:
                 return self.reply(413, 'Request size must be between 1 and %d bytes' % limit)
             self.connection.settimeout(120)
             raw = self.rfile.read(length)
             if len(raw) != length:
                 return self.reply(400, 'Incomplete request')
+            if self.path == '/realtime':
+                return self.realtime(raw)
             if self.path == '/transcribe':
                 text = transcribe(raw)
                 return self.reply(200 if text else 422, text or 'No speech detected')
