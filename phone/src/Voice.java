@@ -11,6 +11,8 @@ public class Voice extends Canvas implements CommandListener, Runnable {
     private volatile boolean stop;
     private volatile boolean cancelled;
     private boolean active;
+    private volatile long captureStarted;
+    private volatile long firstWrite;
     private volatile boolean recording;
     private volatile boolean holdToTalk;
     private volatile String status = "Hold centre or 5 to talk";
@@ -74,16 +76,19 @@ public class Voice extends Canvas implements CommandListener, Runnable {
             player.realize();
             RecordControl recorder = (RecordControl) player.getControl("RecordControl");
             if (recorder == null) throw new IOException("Recording unavailable");
+            firstWrite = 0; captureStarted = System.currentTimeMillis();
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             // Bound memory even on phones that do not support setRecordSizeLimit.
             final ByteArrayOutputStream captured = bytes;
             recorder.setRecordStream(new OutputStream() {
                 public void write(int value) throws IOException {
                     if (captured.size() >= 2097152) throw new IOException("Recording too large");
+                    if (firstWrite == 0) firstWrite = System.currentTimeMillis();
                     captured.write(value);
                 }
                 public void write(byte[] data, int offset, int length) throws IOException {
                     if (captured.size() + length > 2097152) throw new IOException("Recording too large");
+                    if (length > 0 && firstWrite == 0) firstWrite = System.currentTimeMillis();
                     captured.write(data, offset, length);
                 }
             });
@@ -93,9 +98,24 @@ public class Voice extends Canvas implements CommandListener, Runnable {
                 recording = true;
                 status = holdToTalk ? "Recording..." : "Recording - use Stop";
                 repaint();
-                long deadline = System.currentTimeMillis() + 30000;
-                while (!stop && System.currentTimeMillis() < deadline) Thread.sleep(50);
+                long recordingStarted = System.currentTimeMillis();
+                long deadline = recordingStarted + 30000;
+                long nextSample = recordingStarted + 1000;
+                while (!stop && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(50);
+                    if (System.currentTimeMillis() >= nextSample) {
+                        app.timing("Capture at " + (System.currentTimeMillis() - recordingStarted) + " ms: " + bytes.size() + " bytes");
+                        nextSample += 1000;
+                    }
+                }
+                app.released();
+                int beforeCommit = bytes.size();
+                recording = false;
+                long commitStarted = System.currentTimeMillis();
                 recorder.stopRecord(); recorder.commit();
+                app.timing("Capture bytes before commit: " + beforeCommit + "/" + bytes.size());
+                app.timing("First capture write: " + (firstWrite == 0 ? -1 : firstWrite - captureStarted) + " ms after opening");
+                app.timing("Commit: " + (System.currentTimeMillis() - commitStarted) + " ms");
                 audio = bytes.toByteArray();
             }
         } catch (Exception exception) { error = exception.toString(); }

@@ -222,3 +222,44 @@ does not establish a blanket licence for every SDK binary.
 The icon was generated with OpenAI image generation and resized to 48×48.
 The application is an independent project, unaffiliated with Nokia or OpenAI.
 The project's own source is released under the MIT licence.
+
+## Low-latency experiment (branch `experiment/low-latency-voice`)
+
+Version 0.4.0 adds an A/B playback test and microphone delivery measurements.
+`main` retains the working release. In Settings, Speech playback defaults to
+**Buffered (original)**. Select **Streaming (experimental)** and Save to try
+feeding incoming MP3 bytes directly to the Java ME player. Restart the bridge
+before using this version. Existing saved URL/token settings remain compatible.
+
+The streaming endpoint sends HTTP/1.0 audio delimited by connection close,
+without waiting for the complete upstream MP3 or requiring chunked-transfer
+support on the phone. The client keeps the HTTP connection alive throughout
+playback. Stop speech closes the player and connection. If playback fails,
+select Buffered again. There is no automatic retry that might make an extra
+billable synthesis request.
+
+### Handset test
+
+1. Install the 0.4.0 JAR/JAD and restart the bridge.
+2. Use Buffered mode for a short voice turn. Open Timings afterward.
+3. Select Streaming in Settings and repeat with a similar short question.
+4. Record a ten-second utterance and inspect the capture byte counts in Timings.
+5. Check Stop speech, then start another recording, and confirm typed chat works.
+
+Timings shows capture bytes once per second, bytes before/after commit,
+transcription/chat round trips, and speech preparation/player start times.
+The release timer starts when the recording worker observes Stop (within its
+50 ms polling interval). Player start is a software timestamp, not a measurement
+of the first audible sound. A video/audio recording is useful for that measurement.
+Capture byte counts can include container headers; steadily increasing counts
+are stronger evidence for live capture than a single nonzero initial count.
+
+The bridge logs per-request elapsed times, conversion time, and streaming first
+bytes/completion times, without logging prompts, recordings or tokens.
+
+Streaming tests prove the bridge forwards a first chunk before the simulated
+upstream finishes. Actual N95 progressive playback and microphone streaming
+remain to be established by the handset test. This version still uploads
+recordings after Stop and uses separate transcription, Responses and TTS calls.
+A persistent Realtime session and live microphone upload are the next stage,
+using these handset results to choose the audio transport.

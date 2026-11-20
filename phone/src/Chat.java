@@ -6,6 +6,20 @@ import javax.microedition.rms.RecordStore;
 
 public class Chat extends MIDlet implements CommandListener, Runnable {
     private Display display;
+    private ChoiceGroup playback = new ChoiceGroup("Speech playback", Choice.EXCLUSIVE,
+        new String[] {"Buffered (original)", "Streaming (experimental)"}, null);
+    private Command timings = new Command("Timings", Command.SCREEN, 5);
+    private Command back = new Command("Back", Command.BACK, 1);
+    private String measurements = "";
+    private long releasedAt;
+    public synchronized void timing(String text) {
+        measurements += text + "\n";
+        if (measurements.length() > 6000) measurements = measurements.substring(measurements.length() - 6000);
+    }
+    public void released() { releasedAt = System.currentTimeMillis(); }
+    public void playbackStarted() {
+        if (releasedAt > 0) timing("Release to player start: " + (System.currentTimeMillis() - releasedAt) + " ms");
+    }
     private Form chat = new Form("N95 ChatGPT");
     private StringItem history = new StringItem("", "Ready");
     private TextField message = new TextField("Message", "", 2000, TextField.ANY);
@@ -43,9 +57,10 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
         });
     }
 
-    public void speechReady(final String error) {
+    public void speechReady(final Speech source, final String error) {
         display.callSerially(new Runnable() {
             public void run() {
+                if (speech != source) return;
                 history.setText(transcript + (error == null ? "" : "\nSpeech: " + error));
                 busy = false;
             }
@@ -54,16 +69,18 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
 
     public Chat() {
         chat.append(history); chat.append(message);
-        chat.addCommand(stopSpeech); chat.addCommand(talk); chat.addCommand(send); chat.addCommand(config); chat.addCommand(fresh); chat.addCommand(exit);
+        chat.addCommand(timings); chat.addCommand(stopSpeech); chat.addCommand(talk); chat.addCommand(send); chat.addCommand(config); chat.addCommand(fresh); chat.addCommand(exit);
         chat.setCommandListener(this);
-        settings.append(url); settings.append(token);
+        settings.append(url); settings.append(token); settings.append(playback);
         settings.addCommand(save); settings.setCommandListener(this);
         try {
             RecordStore store = RecordStore.openRecordStore("settings", true);
             try {
                 if (store.getNumRecords() > 0) {
                     DataInputStream in = new DataInputStream(new ByteArrayInputStream(store.getRecord(1)));
-                    url.setString(in.readUTF()); token.setString(in.readUTF()); in.close();
+                    url.setString(in.readUTF()); token.setString(in.readUTF());
+                    if (in.available() > 0) playback.setSelectedIndex(in.readBoolean() ? 1 : 0, true);
+                    in.close();
                 }
             } finally { store.closeRecordStore(); }
         } catch (Exception ignored) { }
@@ -79,6 +96,12 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
     public void commandAction(Command command, Displayable screen) {
         if (command == exit) { destroyApp(true); notifyDestroyed(); return; }
         if (command == stopSpeech) { if (speech != null) speech.cancel(); return; }
+        if (command == back) { showChat(); return; }
+        if (command == timings) {
+            Form report = new Form("Timings (ms)");
+            synchronized (this) { report.append(measurements); }
+            report.addCommand(back); report.setCommandListener(this); display.setCurrent(report); return;
+        }
         if (busy) return;
         if (speech != null) speech.cancel();
         if (command == talk) {
@@ -90,7 +113,7 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
             try {
                 ByteArrayOutputStream bytes = new ByteArrayOutputStream();
                 DataOutputStream out = new DataOutputStream(bytes);
-                out.writeUTF(url.getString()); out.writeUTF(token.getString()); out.close();
+                out.writeUTF(url.getString()); out.writeUTF(token.getString()); out.writeBoolean(playback.getSelectedIndex() == 1); out.close();
                 byte[] data = bytes.toByteArray();
                 RecordStore store = RecordStore.openRecordStore("settings", true);
                 try {
@@ -107,6 +130,7 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
         }
     }
     public void run() {
+        final long requestStarted = System.currentTimeMillis();
         final boolean transcribing = pendingAudio != null;
         HttpConnection connection = null;
         InputStream input = null;
@@ -143,6 +167,7 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
             try { if (output != null) output.close(); } catch (Exception ignored) { }
             try { if (connection != null) connection.close(); } catch (Exception ignored) { }
         }
+        timing((transcribing ? "Transcribe" : "Chat") + " round trip: " + (System.currentTimeMillis() - requestStarted) + " ms");
         final String result = answer;
         final String next = responseId;
         final boolean ok = success;
@@ -162,7 +187,7 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
                     history.setText(transcript);
                     if (voiceTurn) {
                         history.setText(transcript + "\nPreparing AI voice...");
-                        speech = new Speech(Chat.this, url.getString(), token.getString(), result);
+                        speech = new Speech(Chat.this, url.getString(), token.getString(), result, playback.getSelectedIndex() == 1);
                         new Thread(speech).start();
                         return;
                     }

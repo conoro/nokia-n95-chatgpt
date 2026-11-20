@@ -6,6 +6,7 @@ import shlex
 import subprocess
 import tempfile
 import uuid
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -37,6 +38,7 @@ def load_env(path):
 
 def transcribe(raw):
     """Normalize handset audio (including AMR) to mono WAV before upload."""
+    conversion_started = time.monotonic()
     with tempfile.TemporaryDirectory(prefix='n95-audio-') as directory:
         source = Path(directory) / 'recording'
         target = Path(directory) / 'speech.wav'
@@ -46,6 +48,7 @@ def transcribe(raw):
                         '-t', '30', '-ac', '1', '-ar', '16000', str(target)],
                        check=True, capture_output=True, timeout=20)
         audio = target.read_bytes()
+    print('audio conversion %.3fs' % (time.monotonic() - conversion_started), flush=True)
     boundary = uuid.uuid4().hex
     model = os.environ.get('OPENAI_TRANSCRIBE_MODEL', 'gpt-4o-mini-transcribe')
     body = (('--' + boundary + '\r\nContent-Disposition: form-data; name="model"\r\n\r\n'
@@ -59,14 +62,18 @@ def transcribe(raw):
         return json.load(response)['text'].strip()
 
 
-def speak(text):
+def speech_request(text):
     request = urllib.request.Request('https://api.openai.com/v1/audio/speech',
         data=json.dumps({'model': os.environ.get('OPENAI_TTS_MODEL', 'gpt-4o-mini-tts'),
                          'voice': os.environ.get('OPENAI_TTS_VOICE', 'alloy'),
                          'input': text, 'response_format': 'mp3'}).encode(),
         headers={'Authorization': 'Bearer ' + os.environ['OPENAI_API_KEY'],
                  'Content-Type': 'application/json'})
-    with urllib.request.urlopen(request, timeout=90) as response:
+    return request
+
+
+def speak(text):
+    with urllib.request.urlopen(speech_request(text), timeout=90) as response:
         audio = response.read(2097153)
     if len(audio) > 2097152:
         raise ValueError('Speech response too large')
@@ -88,8 +95,46 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200 if self.path == '/health' else 404,
                    'N95 bridge ready' if self.path == '/health' else 'Not found')
 
+    def stream_speech(self, text):
+        started = time.monotonic()
+        # Obtain the first bytes before sending success headers, so upstream
+        # authentication failures can still become normal HTTP errors.
+        with urllib.request.urlopen(speech_request(text), timeout=90) as response:
+            chunk = response.read1(4096)
+            if not chunk:
+                return self.reply(502, 'Speech service returned no audio')
+            self.send_response(200)
+            self.send_header('Content-Type', 'audio/mpeg')
+            self.send_header('Connection', 'close')
+            self.end_headers()
+            self.close_connection = True
+            total = 0
+            try:
+                while chunk:
+                    total += len(chunk)
+                    if total > 2097152:
+                        raise OSError('Audio exceeds size limit')
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                    if total == len(chunk):
+                        self.log_message('speech first bytes %.3fs', time.monotonic() - started)
+                    chunk = response.read1(4096)
+            except OSError:
+                # Headers have been sent. Close the stream without injecting
+                # an HTTP error response into the MP3 body.
+                self.log_message('speech stream interrupted after %d bytes', total)
+            finally:
+                self.log_message('speech stream %.3fs, %d bytes', time.monotonic() - started, total)
+
     def do_POST(self):
-        if self.path not in ('/chat', '/transcribe', '/speak'):
+        started = time.monotonic()
+        try:
+            self.handle_post()
+        finally:
+            self.log_message('%s total %.3fs', self.path, time.monotonic() - started)
+
+    def handle_post(self):
+        if self.path not in ('/chat', '/transcribe', '/speak', '/speak-stream'):
             return self.reply(404, 'Not found')
         if not hmac.compare_digest(self.headers.get('X-Bridge-Token', ''), os.environ['BRIDGE_TOKEN']):
             return self.reply(401, 'Incorrect bridge token')
@@ -108,9 +153,11 @@ class Handler(BaseHTTPRequestHandler):
             prompt = raw.decode('utf-8').strip()
             if not prompt:
                 return self.reply(400, 'Enter a message')
-            if self.path == '/speak':
+            if self.path in ('/speak', '/speak-stream'):
                 if len(prompt) > 4096:
                     return self.reply(413, 'Speech text exceeds 4096 characters')
+                if self.path == '/speak-stream':
+                    return self.stream_speech(prompt)
                 return self.reply(200, speak(prompt), content_type='audio/mpeg')
             request = {'model': os.environ['OPENAI_MODEL'], 'input': prompt,
                        'max_output_tokens': 800, 'store': True,

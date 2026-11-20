@@ -1,4 +1,5 @@
 import io
+import http.client
 import wave
 import json
 import os
@@ -12,6 +13,45 @@ from server import Handler
 
 
 class BridgeTest(unittest.TestCase):
+    def test_speech_arrives_before_upstream_finishes(self):
+        release = threading.Event()
+        waiting = threading.Event()
+        class IncrementalAudio(io.BytesIO):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+            def read1(self, size):
+                self.calls += 1
+                if self.calls == 1:
+                    return b'first-audio'
+                if self.calls == 2:
+                    waiting.set()
+                    if not release.wait(5):
+                        raise OSError('Test timed out waiting for consumer')
+                    return b'last-audio'
+                return b''
+        with patch.dict(os.environ, BRIDGE_TOKEN='test-token', OPENAI_API_KEY='fake'):
+            server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            connection = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=5)
+            try:
+                with patch('server.urllib.request.urlopen', return_value=IncrementalAudio()):
+                    connection.request('POST', '/speak-stream', b'Hello', {'X-Bridge-Token': 'test-token'})
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertIsNone(response.getheader('Content-Length'))
+                    self.assertEqual(response.read(11), b'first-audio')
+                    self.assertTrue(waiting.wait(2))
+                    release.set()
+                    self.assertEqual(response.read(), b'last-audio')
+            finally:
+                release.set()
+                connection.close()
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
     def test_chat_flow(self):
         with patch.dict(os.environ, BRIDGE_TOKEN='test-token', OPENAI_API_KEY='fake', OPENAI_MODEL='test-model'):
             server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
