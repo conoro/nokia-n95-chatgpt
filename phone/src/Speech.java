@@ -9,6 +9,8 @@ public class Speech implements Runnable, PlayerListener {
     private String token;
     private String text;
     private boolean streaming;
+    private String previous;
+    private String responseId;
     private volatile boolean cancelled;
     private volatile boolean ended;
     private volatile String playbackError;
@@ -19,6 +21,36 @@ public class Speech implements Runnable, PlayerListener {
     public Speech(Chat app, String url, String token, String text, boolean streaming) {
         this.app = app; this.url = url; this.token = token; this.text = text;
         this.streaming = streaming;
+    }
+    public Speech(Chat app, String url, String token, String text, boolean streaming, String previous) {
+        this(app, url, token, text, streaming);
+        this.previous = previous;
+    }
+    private void fetchReply(String error) throws IOException {
+        HttpConnection http = null;
+        InputStream body = null;
+        OutputStream out = null;
+        try {
+            http = (HttpConnection) Connector.open(url + "/reply", Connector.READ_WRITE, true);
+            http.setRequestMethod(HttpConnection.POST);
+            http.setRequestProperty("X-Bridge-Token", token);
+            byte[] data = responseId.getBytes("UTF-8");
+            http.setRequestProperty("Content-Length", Integer.toString(data.length));
+            out = http.openOutputStream(); out.write(data); out.close(); out = null;
+            if (http.getResponseCode() != 200) throw new IOException("Could not retrieve reply text");
+            body = http.openInputStream();
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            byte[] buffer = new byte[1024]; int count;
+            while ((count = body.read(buffer)) != -1) {
+                if (bytes.size() + count > 32768) throw new IOException("Reply too large");
+                bytes.write(buffer, 0, count);
+            }
+            app.voiceReply(this, responseId, new String(bytes.toByteArray(), "UTF-8"), error);
+        } finally {
+            if (body != null) body.close();
+            if (out != null) out.close();
+            if (http != null) http.close();
+        }
     }
     public void cancel() {
         cancelled = true;
@@ -47,7 +79,7 @@ public class Speech implements Runnable, PlayerListener {
         boolean announced = false;
         String error = null;
         try {
-            HttpConnection http = (HttpConnection) Connector.open(url + (streaming ? "/speak-stream" : "/speak"), Connector.READ_WRITE, true);
+            HttpConnection http = (HttpConnection) Connector.open(url + (previous != null ? (streaming ? "/voice-chat-stream" : "/voice-chat") : (streaming ? "/speak-stream" : "/speak")), Connector.READ_WRITE, true);
             synchronized (this) {
                 if (cancelled) { http.close(); return; }
                 connection = http;
@@ -55,10 +87,12 @@ public class Speech implements Runnable, PlayerListener {
             http.setRequestMethod(HttpConnection.POST);
             http.setRequestProperty("Content-Type", "text/plain; charset=utf-8");
             http.setRequestProperty("X-Bridge-Token", token);
+            if (previous != null && previous.length() > 0) http.setRequestProperty("X-Response-Id", previous);
             byte[] request = text.getBytes("UTF-8");
             http.setRequestProperty("Content-Length", Integer.toString(request.length));
             output = http.openOutputStream(); output.write(request); output.close(); output = null;
             int status = http.getResponseCode();
+            responseId = http.getHeaderField("X-Response-Id");
             InputStream body = http.openInputStream();
             synchronized (this) {
                 if (cancelled) { body.close(); return; }
@@ -88,7 +122,9 @@ public class Speech implements Runnable, PlayerListener {
             current.start();
             app.timing((streaming ? "Streaming" : "Buffered") + " player start: " + (System.currentTimeMillis() - started) + " ms");
             app.playbackStarted();
-            app.speechReady(this, null); announced = true;
+            if (previous != null) fetchReply(null);
+            else app.speechReady(this, null);
+            announced = true;
             long deadline = System.currentTimeMillis() + 180000;
             while (!ended && !cancelled && System.currentTimeMillis() < deadline) Thread.sleep(50);
             if (!cancelled) {
@@ -100,7 +136,11 @@ public class Speech implements Runnable, PlayerListener {
         } finally {
             try { if (output != null) output.close(); } catch (Exception ignored) { }
             closeResources();
-            if (!announced || error != null) app.speechReady(this, error);
+            if (!announced && previous != null && responseId != null) {
+                try { fetchReply(error); announced = true; }
+                catch (IOException failure) { error = failure.toString(); }
+            }
+            if (!announced || error != null && previous == null) app.speechReady(this, error);
         }
     }
     private static class LimitedInput extends InputStream {

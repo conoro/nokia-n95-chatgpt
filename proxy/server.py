@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import uuid
 import time
+import threading
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -80,6 +81,10 @@ def speak(text):
     return audio
 
 
+reply_cache = {}
+reply_lock = threading.Lock()
+
+
 class Handler(BaseHTTPRequestHandler):
     def reply(self, status, text, previous='', content_type='text/plain; charset=utf-8'):
         body = text if isinstance(text, bytes) else text.encode('utf-8')
@@ -95,7 +100,7 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(200 if self.path == '/health' else 404,
                    'N95 bridge ready' if self.path == '/health' else 'Not found')
 
-    def stream_speech(self, text):
+    def stream_speech(self, text, response_id=""):
         started = time.monotonic()
         # Obtain the first bytes before sending success headers, so upstream
         # authentication failures can still become normal HTTP errors.
@@ -106,6 +111,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'audio/mpeg')
             self.send_header('Connection', 'close')
+            if response_id:
+                self.send_header('X-Response-Id', response_id)
             self.end_headers()
             self.close_connection = True
             total = 0
@@ -134,7 +141,7 @@ class Handler(BaseHTTPRequestHandler):
             self.log_message('%s total %.3fs', self.path, time.monotonic() - started)
 
     def handle_post(self):
-        if self.path not in ('/chat', '/transcribe', '/speak', '/speak-stream'):
+        if self.path not in ('/chat', '/transcribe', '/speak', '/speak-stream', '/voice-chat', '/voice-chat-stream', '/reply'):
             return self.reply(404, 'Not found')
         if not hmac.compare_digest(self.headers.get('X-Bridge-Token', ''), os.environ['BRIDGE_TOKEN']):
             return self.reply(401, 'Incorrect bridge token')
@@ -153,6 +160,12 @@ class Handler(BaseHTTPRequestHandler):
             prompt = raw.decode('utf-8').strip()
             if not prompt:
                 return self.reply(400, 'Enter a message')
+            if self.path == '/reply':
+                with reply_lock:
+                    cached = reply_cache.get(prompt)
+                if cached is None or time.monotonic() - cached[0] > 600:
+                    return self.reply(404, 'Reply expired from relay')
+                return self.reply(200, cached[1], prompt)
             if self.path in ('/speak', '/speak-stream'):
                 if len(prompt) > 4096:
                     return self.reply(413, 'Speech text exceeds 4096 characters')
@@ -162,6 +175,9 @@ class Handler(BaseHTTPRequestHandler):
             request = {'model': os.environ['OPENAI_MODEL'], 'input': prompt,
                        'max_output_tokens': 800, 'store': True,
                        'instructions': 'Answer concisely in plain text for a small phone screen.'}
+            effort = os.environ.get('OPENAI_REASONING_EFFORT', '').strip()
+            if effort:
+                request['reasoning'] = {'effort': effort}
             previous = self.headers.get('X-Response-Id', '')
             if previous:
                 request['previous_response_id'] = previous
@@ -177,6 +193,23 @@ class Handler(BaseHTTPRequestHandler):
                                if part.get('type') == 'output_text')
             if not answer:
                 return self.reply(502, 'OpenAI returned no text. Start a new conversation or try again.')
+            if self.path in ('/voice-chat', '/voice-chat-stream'):
+                with reply_lock:
+                    now = time.monotonic()
+                    for key in list(reply_cache):
+                        if now - reply_cache[key][0] > 600:
+                            del reply_cache[key]
+                    if len(reply_cache) >= 128:
+                        del reply_cache[next(iter(reply_cache))]
+                    reply_cache[result['id']] = (now, answer)
+                try:
+                    if len(answer) > 4096:
+                        raise ValueError('Reply too long for speech')
+                    if self.path == '/voice-chat-stream':
+                        return self.stream_speech(answer, result['id'])
+                    return self.reply(200, speak(answer), result['id'], 'audio/mpeg')
+                except (OSError, ValueError):
+                    return self.reply(502, 'Speech failed; text available', result['id'])
             self.reply(200, answer, result['id'])
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
             self.reply(422, 'Could not decode recording. Try a shorter clip.')

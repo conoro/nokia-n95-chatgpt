@@ -53,7 +53,7 @@ class BridgeTest(unittest.TestCase):
                 thread.join()
 
     def test_chat_flow(self):
-        with patch.dict(os.environ, BRIDGE_TOKEN='test-token', OPENAI_API_KEY='fake', OPENAI_MODEL='test-model'):
+        with patch.dict(os.environ, BRIDGE_TOKEN='test-token', OPENAI_API_KEY='fake', OPENAI_MODEL='test-model', OPENAI_REASONING_EFFORT='low'):
             server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -69,7 +69,7 @@ class BridgeTest(unittest.TestCase):
                     if request.full_url.startswith('https://api.openai.com/'):
                         if request.full_url.endswith('/audio/speech'):
                             payload = json.loads(request.data)
-                            self.assertEqual(payload['input'], 'Hello from the N95')
+                            self.assertIn(payload['input'], ('Hello from the N95', 'Hello, café!'))
                             self.assertEqual(payload['response_format'], 'mp3')
                             return io.BytesIO(b'ID3-test-audio')
                         if request.full_url.endswith('/audio/transcriptions'):
@@ -92,6 +92,18 @@ class BridgeTest(unittest.TestCase):
                     with urllib.request.urlopen(request) as response:
                         self.assertEqual(response.headers['Content-Type'], 'audio/mpeg')
                         self.assertEqual(response.read(), b'ID3-test-audio')
+                with patch('urllib.request.urlopen', side_effect=upstream):
+                    request = urllib.request.Request(url.replace('/chat', '/voice-chat-stream'),
+                        data=b'Hello', headers={'X-Bridge-Token': 'test-token'})
+                    with urllib.request.urlopen(request) as response:
+                        self.assertEqual(response.headers['Content-Type'], 'audio/mpeg')
+                        self.assertEqual(response.headers['X-Response-Id'], 'resp_next')
+                        self.assertEqual(response.read(), b'ID3-test-audio')
+                    request = urllib.request.Request(url.replace('/chat', '/reply'),
+                        data=b'resp_next', headers={'X-Bridge-Token': 'test-token'})
+                    with urllib.request.urlopen(request) as response:
+                        self.assertEqual(response.read().decode(), 'Hello, café!')
+                self.assertEqual(captured[0]['reasoning'], {'effort': 'low'})
                 audio = io.BytesIO()
                 with wave.open(audio, 'wb') as wav:
                     wav.setnchannels(1)

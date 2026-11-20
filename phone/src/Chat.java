@@ -12,6 +12,8 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
     private Command back = new Command("Back", Command.BACK, 1);
     private String measurements = "";
     private long releasedAt;
+    private int turn;
+    public synchronized void beginTiming() { measurements = "Turn " + (++turn) + "\n"; releasedAt = 0; }
     public synchronized void timing(String text) {
         measurements += text + "\n";
         if (measurements.length() > 6000) measurements = measurements.substring(measurements.length() - 6000);
@@ -67,6 +69,19 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
         });
     }
 
+    public void voiceReply(final Speech source, final String id, final String answer, final String error) {
+        display.callSerially(new Runnable() {
+            public void run() {
+                if (speech != source) return;
+                previous = id;
+                transcript += "\nYou: " + pending + "\nChatGPT: " + answer + "\n";
+                if (transcript.length() > 12000) transcript = transcript.substring(transcript.length() - 12000);
+                history.setText(transcript + (error == null ? "" : "\nSpeech: " + error));
+                busy = false;
+            }
+        });
+    }
+
     public Chat() {
         chat.append(history); chat.append(message);
         chat.addCommand(timings); chat.addCommand(stopSpeech); chat.addCommand(talk); chat.addCommand(send); chat.addCommand(config); chat.addCommand(fresh); chat.addCommand(exit);
@@ -105,6 +120,7 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
         if (busy) return;
         if (speech != null) speech.cancel();
         if (command == talk) {
+            beginTiming();
             voice = new Voice(this); display.setCurrent(voice);
         }
         if (command == config) display.setCurrent(settings);
@@ -177,7 +193,8 @@ public class Chat extends MIDlet implements CommandListener, Runnable {
                 if (ok && transcribing) {
                     pending = result;
                     history.setText(transcript + "\nYou: " + result + "\nThinking...");
-                    new Thread(Chat.this).start();
+                    speech = new Speech(Chat.this, url.getString(), token.getString(), result, playback.getSelectedIndex() == 1, previous);
+                    new Thread(speech).start();
                     return;
                 } else if (ok) {
                     previous = next;

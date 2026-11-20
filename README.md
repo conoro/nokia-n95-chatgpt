@@ -263,3 +263,21 @@ remain to be established by the handset test. This version still uploads
 recordings after Stop and uses separate transcription, Responses and TTS calls.
 A persistent Realtime session and live microphone upload are the next stage,
 using these handset results to choose the audio transport.
+
+### Speech-first replies (0.4.1)
+
+Set `OPENAI_REASONING_EFFORT=low` for GPT-6.1 Sol. The relay sends this as
+`reasoning.effort` on Responses requests. Leave the setting blank for models
+that do not support reasoning controls. GPT-6.1 Sol does not support `none`.
+
+Voice requests now use `/voice-chat` or `/voice-chat-stream`: the relay obtains
+the model answer and immediately synthesizes speech. The phone starts playback
+before fetching the answer text from `/reply`. The relay keeps up to 128 answer
+texts in memory for ten minutes, keyed by response ID and protected by the same
+bridge token. If speech fails after answer generation, the response ID allows
+the client to retrieve the text. Restarting the relay clears this cache.
+
+This removes the phone text-download/TTS-upload round trip. Synthesis still
+starts after the model has generated the answer text. Transcription remains a
+separate step. Timings now resets on opening each Voice screen and includes a
+turn number. Restart the relay and install the new JAR/JAD for this protocol.
